@@ -16,6 +16,7 @@ import (
 type VaultVar struct {
 	Env   string
 	Field string
+	Path  []string
 }
 
 // Config holds connection settings and the set of secrets to load.
@@ -23,24 +24,14 @@ type VaultVar struct {
 type Config struct {
 	ProxyURL  string            // base URL of the Vault proxy (e.g. from VAULT_PROXY_URL)
 	Namespace string            // optional Vault namespace (e.g. from VAULT_NAMESPACE)
+	Token string            // optional Vault token (e.g. from VAULT_NAMESPACE)
 	Vars      map[string]VaultVar // name -> VaultVar; names become keys in the returned map
 }
 
-// vaultResponse matches the nested structure: data.data.data.secrets
-type vaultResponse struct {
-	Data struct {
-		Data struct {
-			Data struct {
-				Secrets map[string]string `json:"secrets"`
-			} `json:"data"`
-		} `json:"data"`
-	} `json:"data"`
-}
+// defaultKeyPath is the path used when VaultVar.Path is nil or empty.
+var defaultKeyPath = []string{"data", "data", "data", "secrets"}
 
 // LoadSecrets fetches all secrets in cfg.Vars from the Vault proxy.
-// For each entry, the path is read from os.Getenv(v.Env). Results are returned as map[name]value;
-// value is either a string (when VaultVar.Field is set) or the full secrets map (when Field is empty).
-// Returns an error if cfg or cfg.Vars is nil, ProxyURL is empty, or any path/env is missing or fails to fetch.
 func LoadSecrets(cfg *Config) (map[string]interface{}, error) {
 	if cfg == nil || cfg.Vars == nil {
 		return nil, fmt.Errorf("vault config and vars are required")
@@ -57,7 +48,12 @@ func LoadSecrets(cfg *Config) (map[string]interface{}, error) {
 			return nil, fmt.Errorf("%s is not set or empty", v.Env)
 		}
 
-		secrets, err := fetchFromVault(path, cfg.ProxyURL, cfg.Namespace)
+		keyPath := v.Path
+		if len(keyPath) == 0 {
+			keyPath = defaultKeyPath
+		}
+		secrets, err := fetchFromVault(path, cfg.ProxyURL, cfg.Namespace, cfg.Token, keyPath)
+
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch secrets from vault (%s=%s): %w", v.Env, path, err)
 		}
@@ -76,31 +72,26 @@ func LoadSecrets(cfg *Config) (map[string]interface{}, error) {
 	return out, nil
 }
 
-// GetSecrets fetches the raw secrets map for a single path.
-// Proxy URL and namespace are taken from VAULT_PROXY_URL and VAULT_NAMESPACE.
-func GetSecrets(path string) (map[string]string, error) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return nil, fmt.Errorf("vault path cannot be empty")
-	}
-	return fetchFromVault(path, os.Getenv("VAULT_PROXY_URL"), os.Getenv("VAULT_NAMESPACE"))
-}
-
-func fetchFromVault(path, baseURL, namespace string) (map[string]string, error) {
+func fetchFromVault(path, baseURL, namespace, token string, keyPath []string) (map[string]string, error) {
 	if baseURL == "" {
 		return nil, fmt.Errorf("VAULT_PROXY_URL is not set")
 	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/" + strings.TrimPrefix(path, "/")
 	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
+	if err != nil {	
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	if namespace != "" {
 		req.Header.Set("X-Vault-Namespace", namespace)
 	}
+	if token != "" {
+		req.Header.Set("X-Vault-Token", token)
+	}
+	
 
 	resp, err := http.DefaultClient.Do(req)
+
 	if err != nil {
 		log.Printf("Failed to fetch secrets from Vault for path %s: %v", path, err)
 		return nil, fmt.Errorf("vault request: %w", err)
@@ -108,6 +99,7 @@ func fetchFromVault(path, baseURL, namespace string) (map[string]string, error) 
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
+
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
@@ -117,15 +109,63 @@ func fetchFromVault(path, baseURL, namespace string) (map[string]string, error) 
 		return nil, fmt.Errorf("vault returned status %d", resp.StatusCode)
 	}
 
-	var v vaultResponse
-	if err := json.Unmarshal(body, &v); err != nil {
-		log.Printf("Invalid Vault response structure: %v", err)
+	var raw interface{}
+	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("invalid vault response: %w", err)
 	}
 
-	secrets := v.Data.Data.Data.Secrets
-	if secrets == nil {
-		return map[string]string{}, nil
+	current := raw
+	for _, key := range keyPath {
+		m, ok := current.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("vault response: expected object before %q", key)
+		}
+		v, ok := m[key]
+		if !ok {
+			return nil, fmt.Errorf("vault response: key %q not found", key)
+		}
+		current = v
 	}
-	return secrets, nil
+
+	// Recursively walk until we find string leaves and flatten them into a map.
+	out := make(map[string]string)
+	if err := collectStringLeaves("", current, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// collectStringLeaves walks an arbitrary decoded JSON value and collects all
+// leaf values (scalars: string, number, bool, etc.) into out as strings, using
+// dot-separated keys for nested objects and [index] notation for arrays.
+// Only objects and arrays are recursed into; any other type is converted to string.
+func collectStringLeaves(prefix string, v interface{}, out map[string]string) error {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for k, child := range t {
+			next := k
+			if prefix != "" {
+				next = prefix + "." + k
+			}
+			if err := collectStringLeaves(next, child, out); err != nil {
+				return err
+			}
+		}
+	case []interface{}:
+		for i, child := range t {
+			idxKey := fmt.Sprintf("%s[%d]", prefix, i)
+			if prefix == "" {
+				idxKey = fmt.Sprintf("[%d]", i)
+			}
+			if err := collectStringLeaves(idxKey, child, out); err != nil {
+				return err
+			}
+		}
+	default:
+		// Any scalar (string, int, float, bool, nil) — record as string.
+		if prefix != "" {
+			out[prefix] = fmt.Sprint(t)
+		}
+	}
+	return nil
 }
