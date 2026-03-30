@@ -52,8 +52,17 @@ func LoadSecrets(cfg *Config) (map[string]interface{}, error) {
 		if len(keyPath) == 0 {
 			keyPath = defaultKeyPath
 		}
-		secrets, err := fetchFromVault(path, cfg.ProxyURL, cfg.Namespace, cfg.Token, keyPath)
 
+		var (
+			secrets map[string]string
+			err     error
+		)
+
+		if os.Getenv("APP_ENV") == "local" {
+			secrets, err = fetchFromLocalVaultFile("vault.json", path)
+		} else {
+			secrets, err = fetchFromVault(path, cfg.ProxyURL, cfg.Namespace, cfg.Token, keyPath)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch secrets from vault (%s=%s): %w", v.Env, path, err)
 		}
@@ -70,6 +79,60 @@ func LoadSecrets(cfg *Config) (map[string]interface{}, error) {
 	}
 
 	return out, nil
+}
+
+func fetchFromLocalVaultFile(filePath, fullPath string) (map[string]string, error) {
+	body, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("read local vault file: %w", err)
+	}
+
+	raw, err := parseLocalVaultMap(body)
+	if err != nil {
+		return nil, fmt.Errorf("invalid local vault file: %w", err)
+	}
+
+	current, ok := raw[fullPath]
+	if !ok {
+		return nil, fmt.Errorf("local vault key %q not found", fullPath)
+	}
+
+	for _, key := range []string{"data", "secrets"} {
+		m, ok := current.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("local vault value: expected object before %q", key)
+		}
+		v, ok := m[key]
+		if !ok {
+			return nil, fmt.Errorf("local vault value: key %q not found", key)
+		}
+		current = v
+	}
+
+	out := make(map[string]string)
+	if err := collectStringLeaves("", current, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func parseLocalVaultMap(body []byte) (map[string]interface{}, error) {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(body, &raw); err == nil {
+		return raw, nil
+	}
+
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" {
+		return nil, fmt.Errorf("empty content")
+	}
+
+	// Support key-value fragment files by wrapping with braces.
+	wrapped := "{" + trimmed + "}"
+	if err := json.Unmarshal([]byte(wrapped), &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
 }
 
 func fetchFromVault(path, baseURL, namespace, token string, keyPath []string) (map[string]string, error) {
@@ -113,6 +176,8 @@ func fetchFromVault(path, baseURL, namespace, token string, keyPath []string) (m
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("invalid vault response: %w", err)
 	}
+
+	
 
 	current := raw
 	for _, key := range keyPath {
