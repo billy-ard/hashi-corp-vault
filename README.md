@@ -6,6 +6,7 @@ Go package for loading secrets from a HashiCorp Vault proxy. It talks to an HTTP
 
 - **Vault proxy**: A service that accepts `GET {baseURL}/{path}` and returns JSON. The structure can differ per path (e.g. one might be `data.data.data.secrets`, another `data.payload`).
 - **Environment**: Per-secret paths are read from env vars you define (e.g. `VAULT_PRIVATE_KEY_PATH`).
+- **Local mode file (optional)**: If `APP_ENV=local`, secrets are loaded from `secrets.json` in the current working directory.
 
 ## Installation
 
@@ -58,6 +59,36 @@ func main() {
 }
 ```
 
+## Local mode (`APP_ENV=local`)
+
+When `APP_ENV` is set to `local`, `LoadSecrets` does not call the Vault proxy.  
+Instead, it loads from `secrets.json` and looks up each secret using path:
+
+- if `Path` is empty, the default path is used: `data/data/data/secrets`
+
+Then it reads from that key and extracts `data.secrets`, and flattens scalar leaves into `map[string]string` (same as proxy mode).
+
+Expected `secrets.json` structure:
+
+```json
+{
+  "/v1/static-secret/data/hero/backend/third-party/credentials/data/data/data/secrets": {
+    "data": {
+      "secrets": {
+        "hero_key": {
+          "clientName": "Hero",
+          "secret": "xxxxx"
+        }
+      }
+    }
+  }
+}
+```
+
+`secrets.json` can be either:
+- a standard JSON object, or
+- a key-value JSON fragment (without outer `{}`), which will still be parsed.
+
 ## Package API
 
 ### Types
@@ -76,7 +107,7 @@ func main() {
 ### Functions
 
 - **`LoadSecrets(cfg *Config) (map[string]interface{}, error)`**  
-  Fetches all secrets in `cfg.Vars`. For each entry, the path is taken from `os.Getenv(v.Env)`. The response is walked using `v.Path` (or the default), then all scalar leaves (string, number, bool, etc.) are collected into a flat map with dot-separated and `[index]` keys. Returns a map from your chosen names to either a single string (when `Field` is set) or the full flattened `map[string]string`. Errors if config/vars are nil, proxy URL is empty, or any path is missing or fails.
+  Fetches all secrets in `cfg.Vars`. For each entry, the path is taken from `os.Getenv(v.Env)`. In non-local mode, data is requested from the Vault proxy and walked using `v.Path` (or the default). In local mode (`APP_ENV=local`), data is loaded from `secrets.json` using the computed `Path` key, then `data.secrets` is read. In both modes, scalar leaves (string, number, bool, etc.) are collected into a flat map with dot-separated and `[index]` keys. Returns a map from your chosen names to either a single string (when `Field` is set) or the full flattened `map[string]string`. Errors if config/vars are nil, proxy URL is empty, local key/path is missing, or parsing/fetching fails.
 
 ### Response handling
 
@@ -90,6 +121,7 @@ func main() {
 | `VAULT_PROXY_URL`   | All            | Base URL of the Vault proxy (required).      |
 | `VAULT_NAMESPACE`   | All            | Optional Vault namespace (header).           |
 | `VAULT_TOKEN`       | All            | Optional Vault token (header).               |
+| `APP_ENV`           | `LoadSecrets`  | Set to `local` to read from `secrets.json`.    |
 | Per-secret (e.g. `VAULT_MY_SECRET_PATH`) | `LoadSecrets` | You define these; each holds one Vault path. |
 
 ## Example: multiple secrets with default path
