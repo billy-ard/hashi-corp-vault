@@ -22,9 +22,9 @@ type VaultVar struct {
 // Config holds connection settings and the set of secrets to load.
 // Used with LoadSecrets to fetch multiple named secrets in one call.
 type Config struct {
-	ProxyURL  string            // base URL of the Vault proxy (e.g. from VAULT_PROXY_URL)
-	Namespace string            // optional Vault namespace (e.g. from VAULT_NAMESPACE)
-	Token string            // optional Vault token (e.g. from VAULT_NAMESPACE)
+	ProxyURL  string              // base URL of the Vault proxy (e.g. from VAULT_PROXY_URL)
+	Namespace string              // optional Vault namespace (e.g. from VAULT_NAMESPACE)
+	Token     string              // optional Vault token (e.g. from VAULT_NAMESPACE)
 	Vars      map[string]VaultVar // name -> VaultVar; names become keys in the returned map
 }
 
@@ -59,7 +59,7 @@ func LoadSecrets(cfg *Config) (map[string]interface{}, error) {
 		)
 
 		if os.Getenv("APP_ENV") == "local" {
-			secrets, err = fetchFromLocalVaultFile("vault.json", path)
+			secrets, err = fetchFromLocalVaultFile("secrets.json", path)
 		} else {
 			secrets, err = fetchFromVault(path, cfg.ProxyURL, cfg.Namespace, cfg.Token, keyPath)
 		}
@@ -81,7 +81,7 @@ func LoadSecrets(cfg *Config) (map[string]interface{}, error) {
 	return out, nil
 }
 
-func fetchFromLocalVaultFile(filePath, fullPath string) (map[string]string, error) {
+func fetchFromLocalVaultFile(filePath, path string) (map[string]string, error) {
 	body, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("read local vault file: %w", err)
@@ -92,9 +92,9 @@ func fetchFromLocalVaultFile(filePath, fullPath string) (map[string]string, erro
 		return nil, fmt.Errorf("invalid local vault file: %w", err)
 	}
 
-	current, ok := raw[fullPath]
+	current, ok := raw[path]
 	if !ok {
-		return nil, fmt.Errorf("local vault key %q not found", fullPath)
+		return nil, fmt.Errorf("local vault key %q not found", path)
 	}
 
 	for _, key := range []string{"data", "secrets"} {
@@ -142,7 +142,7 @@ func fetchFromVault(path, baseURL, namespace, token string, keyPath []string) (m
 
 	url := strings.TrimSuffix(baseURL, "/") + "/" + strings.TrimPrefix(path, "/")
 	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {	
+	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	if namespace != "" {
