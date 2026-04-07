@@ -11,7 +11,7 @@ import (
 )
 
 // VaultVar describes one secret to load from Vault.
-// Env is the name of an environment variable that holds the Vault path for this secret.
+// Env is the name of an environment variable that holds the Vault path for this
 // Field is the key to extract from the secret's "secrets" map (e.g. "value"); leave empty to get the full map.
 type VaultVar struct {
 	Env   string
@@ -97,16 +97,16 @@ func fetchFromLocalVaultFile(filePath, path string) (map[string]string, error) {
 		return nil, fmt.Errorf("local vault key %q not found", path)
 	}
 
-	for _, key := range []string{"data", "secrets"} {
-		m, ok := current.(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("local vault value: expected object before %q", key)
+	// Unwrap proxy-shaped { "data": { "secrets": { ... } } } when present.
+	// Otherwise use the object at path as-is (flat secrets.json per path).
+	if m, ok := current.(map[string]interface{}); ok {
+		if d, hasData := m["data"].(map[string]interface{}); hasData {
+			if s, ok := d["secrets"].(map[string]interface{}); ok {
+				current = s
+			} else {
+				current = d
+			}
 		}
-		v, ok := m[key]
-		if !ok {
-			return nil, fmt.Errorf("local vault value: key %q not found", key)
-		}
-		current = v
 	}
 
 	out := make(map[string]string)
